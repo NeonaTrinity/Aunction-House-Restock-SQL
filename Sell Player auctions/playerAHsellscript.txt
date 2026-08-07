@@ -1,0 +1,171 @@
+USE acore_characters;
+
+SET @fake_seller_1 := 2506;
+SET @fake_seller_2 := 2507;
+
+SET @budget := (SELECT config_value + 0 FROM custom_ah_simulated_sales_config WHERE config_key='market_budget_gold') * 10000;
+SET @max_sales := (SELECT config_value + 0 FROM custom_ah_simulated_sales_config WHERE config_key='max_sales_per_run');
+SET @min_age := (SELECT config_value + 0 FROM custom_ah_simulated_sales_config WHERE config_key='min_age_seconds');
+SET @sale_chance := (SELECT config_value + 0 FROM custom_ah_simulated_sales_config WHERE config_key='sale_chance');
+SET @max_price_mult := (SELECT config_value + 0 FROM custom_ah_simulated_sales_config WHERE config_key='max_price_multiplier');
+SET @mail_delay := (SELECT config_value + 0 FROM custom_ah_simulated_sales_config WHERE config_key='mail_delay_seconds');
+SET @cut_rate := (SELECT config_value + 0 FROM custom_ah_simulated_sales_config WHERE config_key='auction_cut_rate');
+SET @buyer_hex := (SELECT config_value FROM custom_ah_simulated_sales_config WHERE config_key='simulated_buyer_hex');
+SET @unknown_mult := (SELECT config_value + 0 FROM custom_ah_simulated_sales_config WHERE config_key='unknown_item_max_multiplier');
+
+DROP TEMPORARY TABLE IF EXISTS ah_sales_candidates;
+CREATE TEMPORARY TABLE ah_sales_candidates (
+  pick_order INT AUTO_INCREMENT PRIMARY KEY,
+  auction_id INT,
+  itemguid INT,
+  itemowner INT,
+  itemEntry INT,
+  item_count INT,
+  buyoutprice INT,
+  deposit INT,
+  auction_age_seconds INT,
+  payout INT,
+  subject_text VARCHAR(255),
+  body_text VARCHAR(255)
+);
+
+INSERT INTO ah_sales_candidates
+(auction_id, itemguid, itemowner, itemEntry, item_count, buyoutprice, deposit, auction_age_seconds, payout, subject_text, body_text)
+SELECT
+  ah.id,
+  ah.itemguid,
+  ah.itemowner,
+  ii.itemEntry,
+  ii.count,
+  ah.buyoutprice,
+  ah.deposit,
+  UNIX_TIMESTAMP() - (ah.time - 172800),
+  GREATEST(0, ROUND(ah.buyoutprice - (ah.buyoutprice * @cut_rate) + ah.deposit)),
+  CONCAT(ii.itemEntry, ':0:2:', ah.id, ':', ii.count),
+  CONCAT(@buyer_hex, ':', ah.buyoutprice, ':', ah.buyoutprice, ':', ah.deposit, ':', ROUND(ah.buyoutprice * @cut_rate), ':0:0')
+FROM auctionhouse ah
+JOIN item_instance ii ON ii.guid = ah.itemguid
+JOIN acore_world.item_template it ON it.entry = ii.itemEntry
+LEFT JOIN custom_ah_item_pool p ON p.item_entry = ii.itemEntry
+LEFT JOIN custom_ah_price_overrides o ON o.item_entry = ii.itemEntry
+LEFT JOIN custom_ah_excluded_items x ON x.item_entry = ii.itemEntry
+WHERE ah.itemowner NOT IN (@fake_seller_1, @fake_seller_2)
+  AND ah.buyoutprice > 0
+  AND COALESCE(p.enabled, 1) = 1
+  AND x.item_entry IS NULL
+  AND UNIX_TIMESTAMP() - (ah.time - 172800) >= @min_age
+  AND RAND() < @sale_chance
+  AND ah.buyoutprice <= COALESCE(
+    ROUND(o.buyout_override * @max_price_mult),
+    ROUND(it.SellPrice * ii.count * COALESCE(p.max_multiplier, @unknown_mult) * @max_price_mult)
+  )
+ORDER BY UNIX_TIMESTAMP() - (ah.time - 172800) DESC, RAND();
+
+SET @remaining := @budget;
+SET @sold := 0;
+
+DROP TEMPORARY TABLE IF EXISTS ah_sales_to_process;
+CREATE TEMPORARY TABLE ah_sales_to_process AS
+SELECT *
+FROM (
+  SELECT
+    c.*,
+    (@remaining := @remaining - c.buyoutprice) AS remaining_budget,
+    (@sold := @sold + 1) AS sale_number
+  FROM ah_sales_candidates c
+  WHERE c.buyoutprice <= @remaining
+    AND @sold < @max_sales
+  ORDER BY c.pick_order
+) picked;
+
+SET @base_mail_id := GREATEST(
+  (SELECT config_value + 0 FROM custom_ah_simulated_sales_config WHERE config_key='custom_mail_id_start'),
+  (SELECT IFNULL(MAX(id), 0) + 1000 FROM mail)
+);
+
+SELECT
+  ah.id AS auction_id,
+  COALESCE(ch.name, CONCAT('GUID ', ah.itemowner)) AS seller,
+  ii.itemEntry,
+  it.name AS item_name,
+  ii.count AS stack_size,
+  ah.buyoutprice,
+  COALESCE(
+    ROUND(o.buyout_override * @max_price_mult),
+    ROUND(it.SellPrice * ii.count * COALESCE(p.max_multiplier, @unknown_mult) * @max_price_mult)
+  ) AS fair_max_price,
+  ROUND((UNIX_TIMESTAMP() - (ah.time - 172800)) / 60) AS age_minutes,
+  CASE
+    WHEN ah.itemowner IN (@fake_seller_1, @fake_seller_2) THEN 'FAKE SELLER - IGNORE'
+    WHEN ah.buyoutprice <= 0 THEN 'NO BUYOUT'
+    WHEN x.item_entry IS NOT NULL THEN 'EXCLUDED ITEM'
+    WHEN COALESCE(p.enabled, 1) = 0 THEN 'DISABLED ITEM'
+    WHEN UNIX_TIMESTAMP() - (ah.time - 172800) < @min_age THEN 'TOO NEW'
+    WHEN ah.buyoutprice > COALESCE(
+      ROUND(o.buyout_override * @max_price_mult),
+      ROUND(it.SellPrice * ii.count * COALESCE(p.max_multiplier, @unknown_mult) * @max_price_mult)
+    ) THEN 'PRICE TOO HIGH'
+    WHEN ah.id IN (SELECT auction_id FROM ah_sales_to_process) THEN 'SOLD THIS RUN'
+    WHEN p.item_entry IS NULL THEN 'ELIGIBLE UNKNOWN ITEM BUT NOT PICKED'
+    ELSE 'ELIGIBLE BUT NOT PICKED'
+  END AS result
+FROM auctionhouse ah
+JOIN item_instance ii ON ii.guid = ah.itemguid
+JOIN acore_world.item_template it ON it.entry = ii.itemEntry
+LEFT JOIN custom_ah_item_pool p ON p.item_entry = ii.itemEntry
+LEFT JOIN custom_ah_price_overrides o ON o.item_entry = ii.itemEntry
+LEFT JOIN custom_ah_excluded_items x ON x.item_entry = ii.itemEntry
+LEFT JOIN characters ch ON ch.guid = ah.itemowner
+WHERE ah.itemowner NOT IN (@fake_seller_1, @fake_seller_2)
+ORDER BY result, age_minutes DESC, ah.id;
+
+START TRANSACTION;
+
+INSERT INTO mail
+(id, messageType, stationery, mailTemplateId, sender, receiver, subject, body, has_items, expire_time, deliver_time, money, cod, checked)
+SELECT
+  @base_mail_id + sale_number,
+  2,
+  62,
+  0,
+  7,
+  itemowner,
+  subject_text,
+  body_text,
+  0,
+  UNIX_TIMESTAMP() + 2592000,
+  UNIX_TIMESTAMP() + @mail_delay,
+  payout,
+  0,
+  4
+FROM ah_sales_to_process;
+
+DELETE ah
+FROM auctionhouse ah
+JOIN ah_sales_to_process s ON s.auction_id = ah.id;
+
+DELETE ii
+FROM item_instance ii
+JOIN ah_sales_to_process s ON s.itemguid = ii.guid;
+
+COMMIT;
+
+SELECT
+  s.auction_id,
+  ch.name AS seller,
+  s.itemEntry,
+  it.name AS item_name,
+  s.item_count,
+  s.buyoutprice,
+  s.payout,
+  s.remaining_budget
+FROM ah_sales_to_process s
+LEFT JOIN characters ch ON ch.guid = s.itemowner
+JOIN acore_world.item_template it ON it.entry = s.itemEntry
+ORDER BY s.sale_number;
+
+SELECT
+  COUNT(*) AS simulated_sales,
+  SUM(buyoutprice) AS market_spent_copper,
+  SUM(payout) AS player_payout_copper
+FROM ah_sales_to_process;

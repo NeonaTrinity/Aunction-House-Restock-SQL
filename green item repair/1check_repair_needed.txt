@@ -1,0 +1,20 @@
+USE acore_characters;
+
+SELECT
+    ah.id AS auction_id,
+    ah.itemguid,
+    ii.itemEntry,
+    it.name,
+    ii.randomPropertyId,
+    ii.enchantments
+FROM auctionhouse ah
+JOIN item_instance ii ON ii.guid = ah.itemguid
+JOIN acore_world.item_template it ON it.entry = ii.itemEntry
+WHERE it.Quality = 2
+  AND ii.randomPropertyId = 0
+  AND (
+      it.RandomProperty <> 0
+      OR it.RandomSuffix <> 0
+  )
+ORDER BY ah.id DESC
+LIMIT 100;

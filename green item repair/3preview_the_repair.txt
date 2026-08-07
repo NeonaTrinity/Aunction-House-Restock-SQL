@@ -1,0 +1,40 @@
+DROP TEMPORARY TABLE IF EXISTS dml_ah_random_rolls_exact;
+
+CREATE TEMPORARY TABLE dml_ah_random_rolls_exact AS
+WITH candidates AS (
+    SELECT
+        ah.id AS auction_id,
+        ah.itemguid,
+        ii.itemEntry,
+        it.name AS item_name,
+        ex.randomPropertyId,
+        ex.enchantments,
+        ROW_NUMBER() OVER (
+            PARTITION BY ah.itemguid
+            ORDER BY RAND()
+        ) AS rn
+    FROM auctionhouse ah
+    JOIN item_instance ii ON ii.guid = ah.itemguid
+    JOIN acore_world.item_template it ON it.entry = ii.itemEntry
+    JOIN dml_ah_random_property_examples ex ON ex.itemEntry = ii.itemEntry
+    WHERE it.Quality = 2
+      AND ii.randomPropertyId = 0
+      AND (
+          it.RandomProperty <> 0
+          OR it.RandomSuffix <> 0
+      )
+)
+SELECT
+    auction_id,
+    itemguid,
+    itemEntry,
+    item_name,
+    randomPropertyId,
+    enchantments
+FROM candidates
+WHERE rn = 1;
+
+SELECT *
+FROM dml_ah_random_rolls_exact
+ORDER BY auction_id DESC
+LIMIT 100;

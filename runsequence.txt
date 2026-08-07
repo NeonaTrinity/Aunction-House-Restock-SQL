@@ -1,0 +1,25 @@
+Run sequence
+
+[powershell]
+wsl
+docker exec -it ac-database mysql -uroot -ppassword
+[Starts mysql]
+
+Then runs scripts:
+PlayerAHsellscript (script to sell player listed auctions [optional])
+Restock v6 (or lvl 60 alternate)
+Exit mysql
+
+Shutdown server:
+cd /home/dml/wow-server-playerbots && docker compose down
+
+When these all complete:
+
+ ✔ Container ac-authserver                  Removed                                                                                                    0.4s
+ ✔ Container ac-worldserver                 Removed                                                                                                   10.7s
+ ✔ Container ac-client-data-init            Removed                                                                                                    0.1s
+ ✔ Container ac-db-import                   Removed                                                                                                    0.1s
+ ✔ Container ac-database                    Removed                                                                                                    2.3s
+ ✔ Network wow-server-playerbots_ac-network Removed                                                                                                    0.2s
+ ✔ Network wow-server-playerbots_default    Removed                                                                                                    0.4s
+[dml@DESKTOP-6IEMLT7 wow-server-playerbots]$

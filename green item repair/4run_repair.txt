@@ -1,0 +1,9 @@
+UPDATE item_instance ii
+JOIN dml_ah_random_rolls_exact r ON r.itemguid = ii.guid
+SET
+    ii.randomPropertyId = r.randomPropertyId,
+    ii.enchantments = r.enchantments;
+
+SELECT
+    COUNT(*) AS exact_random_property_repairs
+FROM dml_ah_random_rolls_exact;

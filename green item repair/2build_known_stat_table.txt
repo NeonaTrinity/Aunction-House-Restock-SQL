@@ -1,0 +1,65 @@
+USE acore_characters;
+
+CREATE TABLE IF NOT EXISTS dml_ah_random_property_examples (
+    id INT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    itemEntry INT UNSIGNED NOT NULL,
+    item_name VARCHAR(255) NOT NULL,
+    item_class INT NOT NULL,
+    item_subclass INT NOT NULL,
+    inventory_type INT NOT NULL,
+    required_level INT NOT NULL,
+    item_level INT NOT NULL,
+    randomPropertyId INT NOT NULL,
+    enchantments VARCHAR(255) NOT NULL,
+    examples INT UNSIGNED NOT NULL DEFAULT 1,
+    KEY idx_itemEntry (itemEntry),
+    KEY idx_item_shape (item_class, item_subclass, inventory_type, required_level, item_level)
+);
+
+TRUNCATE TABLE dml_ah_random_property_examples;
+
+INSERT INTO dml_ah_random_property_examples
+(
+    itemEntry,
+    item_name,
+    item_class,
+    item_subclass,
+    inventory_type,
+    required_level,
+    item_level,
+    randomPropertyId,
+    enchantments,
+    examples
+)
+SELECT
+    ii.itemEntry,
+    COALESCE(it.name, CONCAT('item ', ii.itemEntry)) AS item_name,
+    it.class AS item_class,
+    it.subclass AS item_subclass,
+    it.InventoryType AS inventory_type,
+    it.RequiredLevel AS required_level,
+    it.ItemLevel AS item_level,
+    ii.randomPropertyId,
+    ii.enchantments,
+    COUNT(*) AS examples
+FROM item_instance ii
+JOIN acore_world.item_template it ON it.entry = ii.itemEntry
+WHERE it.Quality = 2
+  AND ii.randomPropertyId <> 0
+  AND ii.enchantments IS NOT NULL
+  AND ii.enchantments <> ''
+  AND ii.enchantments <> '0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0'
+  AND ii.enchantments REGEXP '^0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 '
+GROUP BY
+    ii.itemEntry,
+    it.name,
+    it.class,
+    it.subclass,
+    it.InventoryType,
+    it.RequiredLevel,
+    it.ItemLevel,
+    ii.randomPropertyId,
+    ii.enchantments;
+
+SELECT COUNT(*) AS known_good_random_examples
+FROM dml_ah_random_property_examples;

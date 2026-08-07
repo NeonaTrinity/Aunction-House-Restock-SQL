@@ -1,0 +1,339 @@
+USE acore_characters;
+
+SET @seller_alliance := (SELECT config_value + 0 FROM custom_ah_restock_config WHERE config_key='seller_alliance_guid');
+SET @seller_horde := (SELECT config_value + 0 FROM custom_ah_restock_config WHERE config_key='seller_horde_guid');
+SET @use_both := (SELECT config_value + 0 FROM custom_ah_restock_config WHERE config_key='use_both_sellers');
+SET @house := (SELECT config_value + 0 FROM custom_ah_restock_config WHERE config_key='auction_house_id');
+SET @duration := (SELECT config_value + 0 FROM custom_ah_restock_config WHERE config_key='auction_duration_seconds');
+SET @deposit := (SELECT config_value + 0 FROM custom_ah_restock_config WHERE config_key='default_deposit');
+
+DROP TEMPORARY TABLE IF EXISTS ah_sellers;
+CREATE TEMPORARY TABLE ah_sellers (seller INT PRIMARY KEY);
+
+INSERT INTO ah_sellers VALUES (@seller_alliance);
+INSERT INTO ah_sellers
+SELECT @seller_horde
+WHERE @use_both = 1;
+
+DROP TEMPORARY TABLE IF EXISTS ah_old_items;
+CREATE TEMPORARY TABLE ah_old_items AS
+SELECT itemguid
+FROM auctionhouse
+WHERE itemowner IN (SELECT seller FROM ah_sellers);
+
+DELETE FROM auctionhouse
+WHERE itemowner IN (SELECT seller FROM ah_sellers);
+
+DELETE ii
+FROM item_instance ii
+JOIN ah_old_items old ON old.itemguid = ii.guid;
+
+DROP TEMPORARY TABLE IF EXISTS ah_nums;
+CREATE TEMPORARY TABLE ah_nums (n INT PRIMARY KEY);
+
+INSERT INTO ah_nums VALUES
+(1),(2),(3),(4),(5),(6),(7),(8),(9),(10),
+(11),(12),(13),(14),(15),(16),(17),(18),(19),(20);
+
+DROP TEMPORARY TABLE IF EXISTS ah_restock;
+CREATE TEMPORARY TABLE ah_restock (
+  row_id INT AUTO_INCREMENT PRIMARY KEY,
+  entry INT,
+  item_count INT,
+  seller INT,
+  buyout BIGINT,
+  startbid BIGINT
+);
+
+INSERT INTO ah_restock (entry, item_count, seller, buyout, startbid)
+SELECT
+  p.item_entry,
+
+  FLOOR(p.min_stack + RAND() * (p.max_stack - p.min_stack + 1)) AS item_count,
+
+  CASE
+    WHEN @use_both = 1 AND RAND() < 0.5 THEN @seller_horde
+    ELSE @seller_alliance
+  END AS seller,
+
+  COALESCE(
+    o.buyout_override,
+    GREATEST(100, ROUND(
+      it.SellPrice
+      * FLOOR(p.min_stack + RAND() * (p.max_stack - p.min_stack + 1))
+      * COALESCE(
+          o.multiplier_override,
+          p.min_multiplier + RAND() * (p.max_multiplier - p.min_multiplier)
+        )
+    ))
+  ) AS buyout,
+
+  0 AS startbid
+
+FROM custom_ah_item_pool p
+JOIN acore_world.item_template it ON it.entry = p.item_entry
+JOIN ah_nums n ON n.n <= p.listings_per_restock
+LEFT JOIN custom_ah_price_overrides o ON o.item_entry = p.item_entry
+LEFT JOIN custom_ah_excluded_items x ON x.item_entry = p.item_entry
+WHERE p.enabled = 1
+  AND x.item_entry IS NULL
+  AND COALESCE(it.RequiredLevel, 0) <= 60
+  AND (
+    p.category IN (
+      'cloth','ore','bar','herb','leather',
+      'enchanting','elemental','gem',
+      'bandage','potion','food','drink','scroll','bag','glyph'
+    )
+    OR (p.category = 'recipe' AND RAND() < 0.35)
+    OR (p.category = 'boe_green' AND RAND() < 0.20)
+    OR (p.category = 'boe_blue' AND RAND() < 0.12)
+    OR (p.category = 'world_epic' AND RAND() < 0.05)
+    OR (p.category = 'crafted_epic' AND RAND() < 0.05)
+    OR (p.category = 'darkmoon' AND RAND() < 0.05)
+  );
+
+UPDATE ah_restock r
+LEFT JOIN custom_ah_price_overrides o ON o.item_entry = r.entry
+SET r.startbid = COALESCE(
+  o.startbid_override,
+  GREATEST(50, ROUND(r.buyout * 0.75))
+);
+
+SET @base_itemguid := (SELECT IFNULL(MAX(guid), 0) FROM item_instance);
+SET @base_auctionid := (SELECT IFNULL(MAX(id), 0) FROM auctionhouse);
+
+INSERT INTO item_instance
+(guid, itemEntry, owner_guid, creatorGuid, giftCreatorGuid, count, duration, charges, flags, enchantments, randomPropertyId, durability, playedTime, text)
+SELECT
+  @base_itemguid + row_id,
+  entry,
+  seller,
+  0, 0,
+  item_count,
+  0, '', 0, '', 0, 0, 0, ''
+FROM ah_restock;
+
+INSERT INTO auctionhouse
+(id, houseid, itemguid, itemowner, buyoutprice, time, buyguid, lastbid, startbid, deposit)
+SELECT
+  @base_auctionid + row_id,
+  @house,
+  @base_itemguid + row_id,
+  seller,
+  buyout,
+  UNIX_TIMESTAMP() + @duration,
+  0, 0,
+  startbid,
+  @deposit
+FROM ah_restock;
+
+-- ============================================================
+-- DML AH Restock V5: Random stat repair for newly stocked green BoEs
+-- This only modifies items created by this restock run.
+-- It copies known-good randomPropertyId/enchantments pairs from exact itemEntry matches.
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS dml_ah_random_property_examples (
+    id INT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    itemEntry INT UNSIGNED NOT NULL,
+    item_name VARCHAR(255) NOT NULL,
+    item_class INT NOT NULL,
+    item_subclass INT NOT NULL,
+    inventory_type INT NOT NULL,
+    required_level INT NOT NULL,
+    item_level INT NOT NULL,
+    randomPropertyId INT NOT NULL,
+    enchantments VARCHAR(255) NOT NULL,
+    examples INT UNSIGNED NOT NULL DEFAULT 1,
+    KEY idx_itemEntry (itemEntry),
+    KEY idx_item_shape (item_class, item_subclass, inventory_type, required_level, item_level)
+);
+
+TRUNCATE TABLE dml_ah_random_property_examples;
+
+INSERT INTO dml_ah_random_property_examples
+(
+    itemEntry,
+    item_name,
+    item_class,
+    item_subclass,
+    inventory_type,
+    required_level,
+    item_level,
+    randomPropertyId,
+    enchantments,
+    examples
+)
+SELECT
+    ii.itemEntry,
+    COALESCE(it.name, CONCAT('item ', ii.itemEntry)) AS item_name,
+    it.class AS item_class,
+    it.subclass AS item_subclass,
+    it.InventoryType AS inventory_type,
+    it.RequiredLevel AS required_level,
+    it.ItemLevel AS item_level,
+    ii.randomPropertyId,
+    ii.enchantments,
+    COUNT(*) AS examples
+FROM item_instance ii
+JOIN acore_world.item_template it ON it.entry = ii.itemEntry
+WHERE it.Quality = 2
+  AND ii.randomPropertyId <> 0
+  AND ii.enchantments IS NOT NULL
+  AND ii.enchantments <> ''
+  AND ii.enchantments <> '0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0'
+  -- Avoid copying examples that look like they have player enchants in early enchant slots.
+  AND ii.enchantments REGEXP '^0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 '
+GROUP BY
+    ii.itemEntry,
+    it.name,
+    it.class,
+    it.subclass,
+    it.InventoryType,
+    it.RequiredLevel,
+    it.ItemLevel,
+    ii.randomPropertyId,
+    ii.enchantments;
+
+DROP TEMPORARY TABLE IF EXISTS dml_ah_v5_new_green_rolls;
+
+CREATE TEMPORARY TABLE dml_ah_v5_new_green_rolls AS
+WITH boe_green_pool AS (
+    SELECT DISTINCT item_entry
+    FROM custom_ah_item_pool
+    WHERE category = 'boe_green'
+),
+candidates AS (
+    SELECT
+        @base_itemguid + r.row_id AS itemguid,
+        r.entry AS itemEntry,
+        it.name AS item_name,
+        ex.randomPropertyId,
+        ex.enchantments,
+        ROW_NUMBER() OVER (
+            PARTITION BY r.row_id
+            ORDER BY RAND()
+        ) AS rn
+    FROM ah_restock r
+    JOIN item_instance ii ON ii.guid = @base_itemguid + r.row_id
+    JOIN acore_world.item_template it ON it.entry = r.entry
+    JOIN boe_green_pool bg ON bg.item_entry = r.entry
+    JOIN dml_ah_random_property_examples ex ON ex.itemEntry = r.entry
+    WHERE it.Quality = 2
+      AND ii.randomPropertyId = 0
+      AND (
+          it.RandomProperty <> 0
+          OR it.RandomSuffix <> 0
+      )
+)
+SELECT
+    itemguid,
+    itemEntry,
+    item_name,
+    randomPropertyId,
+    enchantments
+FROM candidates
+WHERE rn = 1;
+
+UPDATE item_instance ii
+JOIN dml_ah_v5_new_green_rolls r ON r.itemguid = ii.guid
+SET
+    ii.randomPropertyId = r.randomPropertyId,
+    ii.enchantments = r.enchantments;
+
+-- ============================================================
+-- Final cleanup: remove blank green BoEs from this restock run
+--
+-- Only affects newly created auctions from the current run.
+-- A green is considered blank when:
+--   randomPropertyId = 0
+--   AND enchantments contains no modifier data
+-- ============================================================
+
+DROP TEMPORARY TABLE IF EXISTS dml_ah_v5_blank_greens;
+
+CREATE TEMPORARY TABLE dml_ah_v5_blank_greens AS
+SELECT
+    ah.id AS auction_id,
+    ii.guid AS itemguid,
+    ii.itemEntry
+FROM ah_restock r
+JOIN item_instance ii
+    ON ii.guid = @base_itemguid + r.row_id
+JOIN auctionhouse ah
+    ON ah.itemguid = ii.guid
+JOIN acore_world.item_template it
+    ON it.entry = ii.itemEntry
+JOIN custom_ah_item_pool p
+    ON p.item_entry = ii.itemEntry
+WHERE p.category = 'boe_green'
+  AND it.Quality = 2
+  AND (
+      it.RandomProperty <> 0
+      OR it.RandomSuffix <> 0
+  )
+  AND COALESCE(ii.randomPropertyId, 0) = 0
+  AND (
+      ii.enchantments IS NULL
+      OR TRIM(ii.enchantments) = ''
+      OR TRIM(ii.enchantments) REGEXP '^(0[[:space:]]*)+$'
+  );
+
+-- Remove auction records first.
+DELETE ah
+FROM auctionhouse ah
+JOIN dml_ah_v5_blank_greens blank
+    ON blank.auction_id = ah.id;
+
+-- Then remove the corresponding generated item instances.
+DELETE ii
+FROM item_instance ii
+JOIN dml_ah_v5_blank_greens blank
+    ON blank.itemguid = ii.guid;
+
+-- Report how many blank green auctions were removed.
+SELECT
+    COUNT(*) AS blank_green_auctions_removed
+FROM dml_ah_v5_blank_greens;
+
+-- Optional diagnostic list.
+SELECT
+    blank.itemEntry,
+    COALESCE(it.name, CONCAT('item ', blank.itemEntry)) AS item_name,
+    COUNT(*) AS removed_count
+FROM dml_ah_v5_blank_greens blank
+LEFT JOIN acore_world.item_template it
+    ON it.entry = blank.itemEntry
+GROUP BY
+    blank.itemEntry,
+    it.name
+ORDER BY
+    removed_count DESC,
+    blank.itemEntry
+LIMIT 50;
+
+SELECT
+    COUNT(*) AS v5_random_green_repairs
+FROM dml_ah_v5_new_green_rolls;
+
+SELECT
+    r.itemEntry,
+    r.item_name,
+    r.randomPropertyId,
+    r.enchantments
+FROM dml_ah_v5_new_green_rolls r
+ORDER BY r.itemEntry
+LIMIT 50;
+
+SELECT itemowner, COUNT(*) AS auctions
+FROM auctionhouse
+WHERE itemowner IN (@seller_alliance, @seller_horde)
+GROUP BY itemowner;
+
+SELECT p.category, COUNT(*) AS auctions
+FROM auctionhouse ah
+JOIN item_instance ii ON ii.guid = ah.itemguid
+JOIN custom_ah_item_pool p ON p.item_entry = ii.itemEntry
+WHERE ah.itemowner IN (@seller_alliance, @seller_horde)
+GROUP BY p.category
+ORDER BY p.category;
