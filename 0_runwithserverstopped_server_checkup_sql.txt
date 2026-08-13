@@ -1,0 +1,47 @@
+USE acore_characters;
+
+-- 1. Every auction must have a real item_instance.
+SELECT COUNT(*) AS auctions_missing_item
+FROM auctionhouse ah
+LEFT JOIN item_instance ii ON ii.guid = ah.itemguid
+WHERE ii.guid IS NULL;
+
+-- 2. Every inventory reference must have a real item_instance.
+SELECT COUNT(*) AS inventory_missing_item
+FROM character_inventory ci
+LEFT JOIN item_instance ii ON ii.guid = ci.item
+WHERE ii.guid IS NULL;
+
+-- 3. Every mailed-item reference must have a real item_instance.
+SELECT COUNT(*) AS mail_items_missing_item
+FROM mail_items mi
+LEFT JOIN item_instance ii ON ii.guid = mi.item_guid
+WHERE ii.guid IS NULL;
+
+-- 4. An auction item must NOT simultaneously be in character inventory.
+SELECT COUNT(*) AS auction_inventory_shared_guids
+FROM auctionhouse ah
+JOIN character_inventory ci ON ci.item = ah.itemguid;
+
+-- 5. An auction item must NOT simultaneously be attached to mail.
+SELECT COUNT(*) AS auction_mail_shared_guids
+FROM auctionhouse ah
+JOIN mail_items mi ON mi.item_guid = ah.itemguid;
+
+-- 6. item_instance ownership must agree with the auction seller.
+SELECT COUNT(*) AS auction_owner_mismatches
+FROM auctionhouse ah
+JOIN item_instance ii ON ii.guid = ah.itemguid
+WHERE ii.owner_guid <> ah.itemowner;
+
+-- 7. No single item GUID should be used by multiple auctions.
+SELECT itemguid, COUNT(*) AS uses
+FROM auctionhouse
+GROUP BY itemguid
+HAVING COUNT(*) > 1;
+
+-- 8. mail_items must point to an actual mail row.
+SELECT COUNT(*) AS mail_items_missing_mail
+FROM mail_items mi
+LEFT JOIN mail m ON m.id = mi.mail_id
+WHERE m.id IS NULL;

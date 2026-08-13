@@ -86,12 +86,22 @@ WHERE ah.itemowner NOT IN (@fake_seller_1, @fake_seller_2)
 ORDER BY GREATEST(0, UNIX_TIMESTAMP() - (ah.time - @minimum_auction_duration)) DESC, RAND();
 
 DROP TEMPORARY TABLE IF EXISTS ah_sales_to_process;
+DROP TEMPORARY TABLE IF EXISTS ah_sales_candidates_walk;
+
+-- MySQL cannot reference the same user-created TEMPORARY table more than once
+-- in a single query. The recursive budget walk needs one candidate source for
+-- the anchor row and one for the recursive rows, so make a second identical
+-- temporary snapshot. This preserves the deterministic greedy selection logic
+-- without triggering ERROR 1137 "Can't reopen table".
+CREATE TEMPORARY TABLE ah_sales_candidates_walk LIKE ah_sales_candidates;
+
+INSERT INTO ah_sales_candidates_walk
+SELECT *
+FROM ah_sales_candidates;
 
 -- Deterministic MySQL 8 greedy selection.
--- This preserves the old behavior: candidates are considered in pick_order;
--- an auction that does not fit the remaining budget is skipped, and a cheaper
--- later auction may still be selected. No same-statement user-variable
--- read/write ordering is used.
+-- Candidates are considered in pick_order. If one auction does not fit the
+-- remaining budget, it is skipped and a cheaper later auction may still sell.
 SET @old_cte_max_recursion_depth := @@SESSION.cte_max_recursion_depth;
 SET SESSION cte_max_recursion_depth = 100000;
 
@@ -167,7 +177,7 @@ WITH RECURSIVE budget_walk AS (
       ELSE 0
     END AS take_this
   FROM budget_walk w
-  JOIN ah_sales_candidates c
+  JOIN ah_sales_candidates_walk c
     ON c.pick_order = w.pick_order + 1
 )
 SELECT
@@ -190,6 +200,8 @@ WHERE take_this = 1
 ORDER BY pick_order;
 
 SET SESSION cte_max_recursion_depth = @old_cte_max_recursion_depth;
+
+DROP TEMPORARY TABLE IF EXISTS ah_sales_candidates_walk;
 
 SET @base_mail_id := GREATEST(
   (SELECT config_value + 0 FROM custom_ah_simulated_sales_config WHERE config_key='custom_mail_id_start'),
