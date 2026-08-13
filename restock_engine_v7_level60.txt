@@ -7,6 +7,12 @@ SET @house := (SELECT config_value + 0 FROM custom_ah_restock_config WHERE confi
 SET @duration := (SELECT config_value + 0 FROM custom_ah_restock_config WHERE config_key='auction_duration_seconds');
 SET @deposit := (SELECT config_value + 0 FROM custom_ah_restock_config WHERE config_key='default_deposit');
 
+-- IMPORTANT: run this restock while ac-worldserver is STOPPED.
+-- Capture current high-water marks before deleting old generated stock
+-- so item GUIDs and auction IDs do not get recycled downward.
+SET @base_itemguid := (SELECT IFNULL(MAX(guid), 0) FROM item_instance);
+SET @base_auctionid := (SELECT IFNULL(MAX(id), 0) FROM auctionhouse);
+
 DROP TEMPORARY TABLE IF EXISTS ah_sellers;
 CREATE TEMPORARY TABLE ah_sellers (seller INT PRIMARY KEY);
 
@@ -48,32 +54,16 @@ CREATE TEMPORARY TABLE ah_restock (
 INSERT INTO ah_restock (entry, item_count, seller, buyout, startbid)
 SELECT
   p.item_entry,
-
   FLOOR(p.min_stack + RAND() * (p.max_stack - p.min_stack + 1)) AS item_count,
-
   CASE
     WHEN @use_both = 1 AND RAND() < 0.5 THEN @seller_horde
     ELSE @seller_alliance
   END AS seller,
-
-  COALESCE(
-    o.buyout_override,
-    GREATEST(100, ROUND(
-      it.SellPrice
-      * FLOOR(p.min_stack + RAND() * (p.max_stack - p.min_stack + 1))
-      * COALESCE(
-          o.multiplier_override,
-          p.min_multiplier + RAND() * (p.max_multiplier - p.min_multiplier)
-        )
-    ))
-  ) AS buyout,
-
+  0 AS buyout,
   0 AS startbid
-
 FROM custom_ah_item_pool p
 JOIN acore_world.item_template it ON it.entry = p.item_entry
 JOIN ah_nums n ON n.n <= p.listings_per_restock
-LEFT JOIN custom_ah_price_overrides o ON o.item_entry = p.item_entry
 LEFT JOIN custom_ah_excluded_items x ON x.item_entry = p.item_entry
 WHERE p.enabled = 1
   AND x.item_entry IS NULL
@@ -92,6 +82,23 @@ WHERE p.enabled = 1
     OR (p.category = 'darkmoon' AND RAND() < 0.05)
   );
 
+-- Price from the already-generated stack size instead of rolling stack size again.
+UPDATE ah_restock r
+JOIN acore_world.item_template it ON it.entry = r.entry
+JOIN custom_ah_item_pool p ON p.item_entry = r.entry
+LEFT JOIN custom_ah_price_overrides o ON o.item_entry = r.entry
+SET r.buyout = COALESCE(
+  o.buyout_override,
+  GREATEST(100, ROUND(
+    it.SellPrice
+    * r.item_count
+    * COALESCE(
+        o.multiplier_override,
+        p.min_multiplier + RAND() * (p.max_multiplier - p.min_multiplier)
+      )
+  ))
+);
+
 UPDATE ah_restock r
 LEFT JOIN custom_ah_price_overrides o ON o.item_entry = r.entry
 SET r.startbid = COALESCE(
@@ -99,19 +106,31 @@ SET r.startbid = COALESCE(
   GREATEST(50, ROUND(r.buyout * 0.75))
 );
 
-SET @base_itemguid := (SELECT IFNULL(MAX(guid), 0) FROM item_instance);
-SET @base_auctionid := (SELECT IFNULL(MAX(id), 0) FROM auctionhouse);
-
 INSERT INTO item_instance
 (guid, itemEntry, owner_guid, creatorGuid, giftCreatorGuid, count, duration, charges, flags, enchantments, randomPropertyId, durability, playedTime, text)
 SELECT
-  @base_itemguid + row_id,
-  entry,
-  seller,
+  @base_itemguid + r.row_id,
+  r.entry,
+  r.seller,
   0, 0,
-  item_count,
-  0, '', 0, '', 0, 0, 0, ''
-FROM ah_restock;
+  r.item_count,
+  COALESCE(it.duration, 0),
+  CONCAT(
+    COALESCE(it.spellcharges_1, 0), ' ',
+    COALESCE(it.spellcharges_2, 0), ' ',
+    COALESCE(it.spellcharges_3, 0), ' ',
+    COALESCE(it.spellcharges_4, 0), ' ',
+    COALESCE(it.spellcharges_5, 0)
+  ),
+  0,
+  '0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0',
+  0,
+  COALESCE(it.MaxDurability, 0),
+  0,
+  ''
+FROM ah_restock r
+JOIN acore_world.item_template it
+  ON it.entry = r.entry;
 
 INSERT INTO auctionhouse
 (id, houseid, itemguid, itemowner, buyoutprice, time, buyguid, lastbid, startbid, deposit)

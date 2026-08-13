@@ -1,5 +1,22 @@
 USE acore_characters;
 
+-- ============================================================
+-- DML Simulated Player AH Sales - Safe SQL version
+--
+-- SAFETY REQUIREMENT:
+--   Run this script only while ac-worldserver is STOPPED.
+--   ac-database should remain running.
+--
+-- auctionhouse stores an expiration timestamp, not the original
+-- 12/24/48-hour posting duration. To avoid treating a brand-new
+-- 24h/48h auction as already old, age eligibility is calculated
+-- conservatively from the shortest normal WotLK duration (12h).
+-- This guarantees an auction is at least min_age_seconds old
+-- before the simulated buyer can select it.
+-- ============================================================
+
+SET @minimum_auction_duration := 43200;
+
 SET @fake_seller_1 := 2506;
 SET @fake_seller_2 := 2507;
 
@@ -15,16 +32,16 @@ SET @unknown_mult := (SELECT config_value + 0 FROM custom_ah_simulated_sales_con
 
 DROP TEMPORARY TABLE IF EXISTS ah_sales_candidates;
 CREATE TEMPORARY TABLE ah_sales_candidates (
-  pick_order INT AUTO_INCREMENT PRIMARY KEY,
-  auction_id INT,
-  itemguid INT,
-  itemowner INT,
-  itemEntry INT,
-  item_count INT,
-  buyoutprice INT,
-  deposit INT,
-  auction_age_seconds INT,
-  payout INT,
+  pick_order INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  auction_id BIGINT UNSIGNED,
+  itemguid BIGINT UNSIGNED,
+  itemowner BIGINT UNSIGNED,
+  itemEntry INT UNSIGNED,
+  item_count INT UNSIGNED,
+  buyoutprice BIGINT UNSIGNED,
+  deposit BIGINT UNSIGNED,
+  auction_age_seconds BIGINT UNSIGNED,
+  payout BIGINT UNSIGNED,
   subject_text VARCHAR(255),
   body_text VARCHAR(255)
 );
@@ -39,44 +56,140 @@ SELECT
   ii.count,
   ah.buyoutprice,
   ah.deposit,
-  UNIX_TIMESTAMP() - (ah.time - 172800),
+  GREATEST(0, UNIX_TIMESTAMP() - (ah.time - @minimum_auction_duration)),
   GREATEST(0, ROUND(ah.buyoutprice - (ah.buyoutprice * @cut_rate) + ah.deposit)),
   CONCAT(ii.itemEntry, ':0:2:', ah.id, ':', ii.count),
   CONCAT(@buyer_hex, ':', ah.buyoutprice, ':', ah.buyoutprice, ':', ah.deposit, ':', ROUND(ah.buyoutprice * @cut_rate), ':0:0')
 FROM auctionhouse ah
 JOIN item_instance ii ON ii.guid = ah.itemguid
+JOIN characters seller_char ON seller_char.guid = ah.itemowner
 JOIN acore_world.item_template it ON it.entry = ii.itemEntry
+LEFT JOIN character_inventory ci ON ci.item = ah.itemguid
+LEFT JOIN mail_items mi ON mi.item_guid = ah.itemguid
 LEFT JOIN custom_ah_item_pool p ON p.item_entry = ii.itemEntry
 LEFT JOIN custom_ah_price_overrides o ON o.item_entry = ii.itemEntry
 LEFT JOIN custom_ah_excluded_items x ON x.item_entry = ii.itemEntry
 WHERE ah.itemowner NOT IN (@fake_seller_1, @fake_seller_2)
+  AND ii.owner_guid = ah.itemowner
+  AND ci.item IS NULL
+  AND mi.item_guid IS NULL
+  AND ah.time > UNIX_TIMESTAMP()
   AND ah.buyoutprice > 0
   AND COALESCE(p.enabled, 1) = 1
   AND x.item_entry IS NULL
-  AND UNIX_TIMESTAMP() - (ah.time - 172800) >= @min_age
+  AND GREATEST(0, UNIX_TIMESTAMP() - (ah.time - @minimum_auction_duration)) >= @min_age
   AND RAND() < @sale_chance
   AND ah.buyoutprice <= COALESCE(
     ROUND(o.buyout_override * @max_price_mult),
     ROUND(it.SellPrice * ii.count * COALESCE(p.max_multiplier, @unknown_mult) * @max_price_mult)
   )
-ORDER BY UNIX_TIMESTAMP() - (ah.time - 172800) DESC, RAND();
-
-SET @remaining := @budget;
-SET @sold := 0;
+ORDER BY GREATEST(0, UNIX_TIMESTAMP() - (ah.time - @minimum_auction_duration)) DESC, RAND();
 
 DROP TEMPORARY TABLE IF EXISTS ah_sales_to_process;
-CREATE TEMPORARY TABLE ah_sales_to_process AS
-SELECT *
-FROM (
+
+-- Deterministic MySQL 8 greedy selection.
+-- This preserves the old behavior: candidates are considered in pick_order;
+-- an auction that does not fit the remaining budget is skipped, and a cheaper
+-- later auction may still be selected. No same-statement user-variable
+-- read/write ordering is used.
+SET @old_cte_max_recursion_depth := @@SESSION.cte_max_recursion_depth;
+SET SESSION cte_max_recursion_depth = 100000;
+
+CREATE TEMPORARY TABLE ah_sales_to_process
+WITH RECURSIVE budget_walk AS (
   SELECT
-    c.*,
-    (@remaining := @remaining - c.buyoutprice) AS remaining_budget,
-    (@sold := @sold + 1) AS sale_number
+    c.pick_order,
+    c.auction_id,
+    c.itemguid,
+    c.itemowner,
+    c.itemEntry,
+    c.item_count,
+    c.buyoutprice,
+    c.deposit,
+    c.auction_age_seconds,
+    c.payout,
+    c.subject_text,
+    c.body_text,
+    CAST(
+      CASE
+        WHEN @max_sales > 0 AND c.buyoutprice <= @budget THEN c.buyoutprice
+        ELSE 0
+      END AS DECIMAL(20,0)
+    ) AS spent,
+    CAST(
+      CASE
+        WHEN @max_sales > 0 AND c.buyoutprice <= @budget THEN 1
+        ELSE 0
+      END AS UNSIGNED
+    ) AS sold_count,
+    CAST(
+      CASE
+        WHEN @max_sales > 0 AND c.buyoutprice <= @budget THEN 1
+        ELSE 0
+      END AS UNSIGNED
+    ) AS take_this
   FROM ah_sales_candidates c
-  WHERE c.buyoutprice <= @remaining
-    AND @sold < @max_sales
-  ORDER BY c.pick_order
-) picked;
+  WHERE c.pick_order = 1
+
+  UNION ALL
+
+  SELECT
+    c.pick_order,
+    c.auction_id,
+    c.itemguid,
+    c.itemowner,
+    c.itemEntry,
+    c.item_count,
+    c.buyoutprice,
+    c.deposit,
+    c.auction_age_seconds,
+    c.payout,
+    c.subject_text,
+    c.body_text,
+    w.spent +
+      CASE
+        WHEN w.sold_count < @max_sales
+         AND c.buyoutprice <= (@budget - w.spent)
+        THEN c.buyoutprice
+        ELSE 0
+      END AS spent,
+    w.sold_count +
+      CASE
+        WHEN w.sold_count < @max_sales
+         AND c.buyoutprice <= (@budget - w.spent)
+        THEN 1
+        ELSE 0
+      END AS sold_count,
+    CASE
+      WHEN w.sold_count < @max_sales
+       AND c.buyoutprice <= (@budget - w.spent)
+      THEN 1
+      ELSE 0
+    END AS take_this
+  FROM budget_walk w
+  JOIN ah_sales_candidates c
+    ON c.pick_order = w.pick_order + 1
+)
+SELECT
+  pick_order,
+  auction_id,
+  itemguid,
+  itemowner,
+  itemEntry,
+  item_count,
+  buyoutprice,
+  deposit,
+  auction_age_seconds,
+  payout,
+  subject_text,
+  body_text,
+  (@budget - spent) AS remaining_budget,
+  sold_count AS sale_number
+FROM budget_walk
+WHERE take_this = 1
+ORDER BY pick_order;
+
+SET SESSION cte_max_recursion_depth = @old_cte_max_recursion_depth;
 
 SET @base_mail_id := GREATEST(
   (SELECT config_value + 0 FROM custom_ah_simulated_sales_config WHERE config_key='custom_mail_id_start'),
@@ -94,13 +207,18 @@ SELECT
     ROUND(o.buyout_override * @max_price_mult),
     ROUND(it.SellPrice * ii.count * COALESCE(p.max_multiplier, @unknown_mult) * @max_price_mult)
   ) AS fair_max_price,
-  ROUND((UNIX_TIMESTAMP() - (ah.time - 172800)) / 60) AS age_minutes,
+  ROUND((GREATEST(0, UNIX_TIMESTAMP() - (ah.time - @minimum_auction_duration))) / 60) AS age_minutes,
   CASE
     WHEN ah.itemowner IN (@fake_seller_1, @fake_seller_2) THEN 'FAKE SELLER - IGNORE'
+    WHEN ii.owner_guid <> ah.itemowner THEN 'UNSAFE: ITEM OWNER MISMATCH'
+    WHEN ci.item IS NOT NULL THEN 'UNSAFE: ITEM ALSO IN INVENTORY'
+    WHEN mi.item_guid IS NOT NULL THEN 'UNSAFE: ITEM ALSO IN MAIL'
+    WHEN ch.guid IS NULL THEN 'UNSAFE: SELLER CHARACTER MISSING'
+    WHEN ah.time <= UNIX_TIMESTAMP() THEN 'EXPIRED - LEAVE FOR CORE'
     WHEN ah.buyoutprice <= 0 THEN 'NO BUYOUT'
     WHEN x.item_entry IS NOT NULL THEN 'EXCLUDED ITEM'
     WHEN COALESCE(p.enabled, 1) = 0 THEN 'DISABLED ITEM'
-    WHEN UNIX_TIMESTAMP() - (ah.time - 172800) < @min_age THEN 'TOO NEW'
+    WHEN GREATEST(0, UNIX_TIMESTAMP() - (ah.time - @minimum_auction_duration)) < @min_age THEN 'TOO NEW'
     WHEN ah.buyoutprice > COALESCE(
       ROUND(o.buyout_override * @max_price_mult),
       ROUND(it.SellPrice * ii.count * COALESCE(p.max_multiplier, @unknown_mult) * @max_price_mult)
@@ -112,6 +230,8 @@ SELECT
 FROM auctionhouse ah
 JOIN item_instance ii ON ii.guid = ah.itemguid
 JOIN acore_world.item_template it ON it.entry = ii.itemEntry
+LEFT JOIN character_inventory ci ON ci.item = ah.itemguid
+LEFT JOIN mail_items mi ON mi.item_guid = ah.itemguid
 LEFT JOIN custom_ah_item_pool p ON p.item_entry = ii.itemEntry
 LEFT JOIN custom_ah_price_overrides o ON o.item_entry = ii.itemEntry
 LEFT JOIN custom_ah_excluded_items x ON x.item_entry = ii.itemEntry
