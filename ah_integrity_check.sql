@@ -12,6 +12,20 @@
 
 USE acore_characters;
 
+-- Generated AH seller GUIDs are server-specific. Read them from the
+-- same shared configuration used by the restock and player-sale scripts.
+SET @fake_seller_1 := (
+    SELECT config_value + 0
+    FROM custom_ah_restock_config
+    WHERE config_key = 'seller_alliance_guid'
+);
+
+SET @fake_seller_2 := (
+    SELECT config_value + 0
+    FROM custom_ah_restock_config
+    WHERE config_key = 'seller_horde_guid'
+);
+
 -- ============================================================
 -- 1. GLOBAL INTEGRITY SUMMARY
 -- ============================================================
@@ -69,22 +83,21 @@ SELECT
 
 -- ============================================================
 -- 2. GENERATED AH STOCK SUMMARY
--- Trump = 2506
--- Greidenluhst = 2507
+-- Seller GUIDs are read from custom_ah_restock_config
 -- ============================================================
 
 SELECT
     (SELECT COUNT(*)
      FROM auctionhouse ah
      LEFT JOIN item_instance ii ON ii.guid = ah.itemguid
-     WHERE ah.itemowner IN (2506, 2507)
+     WHERE ah.itemowner IN (@fake_seller_1, @fake_seller_2)
        AND ii.guid IS NULL
     ) AS generated_auctions_missing_item,
 
     (SELECT COUNT(*)
      FROM auctionhouse ah
      JOIN item_instance ii ON ii.guid = ah.itemguid
-     WHERE ah.itemowner IN (2506, 2507)
+     WHERE ah.itemowner IN (@fake_seller_1, @fake_seller_2)
        AND ii.owner_guid <> ah.itemowner
     ) AS generated_owner_mismatches,
 
@@ -92,7 +105,7 @@ SELECT
      FROM auctionhouse ah
      JOIN item_instance ii ON ii.guid = ah.itemguid
      JOIN acore_world.item_template it ON it.entry = ii.itemEntry
-     WHERE ah.itemowner IN (2506, 2507)
+     WHERE ah.itemowner IN (@fake_seller_1, @fake_seller_2)
        AND it.MaxDurability > 0
        AND ii.durability <> it.MaxDurability
     ) AS generated_items_bad_durability,
@@ -100,7 +113,7 @@ SELECT
     (SELECT COUNT(*)
      FROM auctionhouse ah
      JOIN item_instance ii ON ii.guid = ah.itemguid
-     WHERE ah.itemowner IN (2506, 2507)
+     WHERE ah.itemowner IN (@fake_seller_1, @fake_seller_2)
        AND (ii.enchantments IS NULL OR TRIM(ii.enchantments) = '')
     ) AS generated_empty_enchantments,
 
@@ -112,7 +125,7 @@ SELECT
        ON p.item_entry = ii.itemEntry
      JOIN acore_world.item_template it
        ON it.entry = ii.itemEntry
-     WHERE ah.itemowner IN (2506, 2507)
+     WHERE ah.itemowner IN (@fake_seller_1, @fake_seller_2)
        AND p.category = 'glyph'
        AND TRIM(ii.charges) <> CONCAT(
            COALESCE(it.spellcharges_1, 0), ' ',
@@ -177,14 +190,14 @@ CASE
          FROM auctionhouse ah
          JOIN item_instance ii ON ii.guid = ah.itemguid
          JOIN acore_world.item_template it ON it.entry = ii.itemEntry
-         WHERE ah.itemowner IN (2506, 2507)
+         WHERE ah.itemowner IN (@fake_seller_1, @fake_seller_2)
            AND it.MaxDurability > 0
            AND ii.durability <> it.MaxDurability) = 0
 
     AND (SELECT COUNT(*)
          FROM auctionhouse ah
          JOIN item_instance ii ON ii.guid = ah.itemguid
-         WHERE ah.itemowner IN (2506, 2507)
+         WHERE ah.itemowner IN (@fake_seller_1, @fake_seller_2)
            AND (ii.enchantments IS NULL OR TRIM(ii.enchantments) = '')) = 0
 
     AND (SELECT COUNT(*)
@@ -192,7 +205,7 @@ CASE
          JOIN item_instance ii ON ii.guid = ah.itemguid
          JOIN custom_ah_item_pool p ON p.item_entry = ii.itemEntry
          JOIN acore_world.item_template it ON it.entry = ii.itemEntry
-         WHERE ah.itemowner IN (2506, 2507)
+         WHERE ah.itemowner IN (@fake_seller_1, @fake_seller_2)
            AND p.category = 'glyph'
            AND TRIM(ii.charges) <> CONCAT(
                COALESCE(it.spellcharges_1, 0), ' ',
@@ -285,7 +298,7 @@ SELECT
 FROM auctionhouse ah
 JOIN item_instance ii ON ii.guid = ah.itemguid
 JOIN acore_world.item_template it ON it.entry = ii.itemEntry
-WHERE ah.itemowner IN (2506, 2507)
+WHERE ah.itemowner IN (@fake_seller_1, @fake_seller_2)
   AND it.MaxDurability > 0
   AND ii.durability <> it.MaxDurability
 ORDER BY ah.id
@@ -309,7 +322,7 @@ FROM auctionhouse ah
 JOIN item_instance ii ON ii.guid = ah.itemguid
 JOIN custom_ah_item_pool p ON p.item_entry = ii.itemEntry
 JOIN acore_world.item_template it ON it.entry = ii.itemEntry
-WHERE ah.itemowner IN (2506, 2507)
+WHERE ah.itemowner IN (@fake_seller_1, @fake_seller_2)
   AND p.category = 'glyph'
   AND TRIM(ii.charges) <> CONCAT(
       COALESCE(it.spellcharges_1, 0), ' ',

@@ -1,0 +1,18 @@
+FIRST TIME SETUP
+
+1. Create one Horde and one Alliance seller character.
+2. Log into both characters once.
+--- chmod +x run_ah_maintenance.sh ----
+3. Run:
+
+   ./run_ah_maintenance.sh
+
+4. Choose:
+   2) Install / Reconfigure
+
+5. Enter the two character names.
+6. Choose Y when asked to import custom AH tables.
+7. When installation finishes, choose whether to run AH maintenance.
+
+For a shared Horde/Alliance Auction House, set:
+AllowTwoSide.Interaction.Auction = 1

@@ -17,8 +17,19 @@ USE acore_characters;
 
 SET @minimum_auction_duration := 43200;
 
-SET @fake_seller_1 := 2506;
-SET @fake_seller_2 := 2507;
+-- Fake AH seller GUIDs come from the shared restock configuration.
+-- Do not hardcode server-specific character GUIDs in this file.
+SET @fake_seller_1 := (
+  SELECT config_value + 0
+  FROM custom_ah_restock_config
+  WHERE config_key = 'seller_alliance_guid'
+);
+
+SET @fake_seller_2 := (
+  SELECT config_value + 0
+  FROM custom_ah_restock_config
+  WHERE config_key = 'seller_horde_guid'
+);
 
 SET @budget := (SELECT config_value + 0 FROM custom_ah_simulated_sales_config WHERE config_key='market_budget_gold') * 10000;
 SET @max_sales := (SELECT config_value + 0 FROM custom_ah_simulated_sales_config WHERE config_key='max_sales_per_run');
