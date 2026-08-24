@@ -1,3 +1,7 @@
+ #Caution
+ sql script depends on specific config settings and is not ready for public use without modifications. 
+ 
+
 # DML Auction House Maintenance Runner
 
 A small maintenance wrapper for the custom AzerothCore Auction House system.
